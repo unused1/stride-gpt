@@ -1,17 +1,86 @@
 import json
 import re
+from PIL import Image
+import base64
+
 import streamlit as st
 import streamlit.components.v1 as components
+
 from mistralai.client import MistralClient
 from mistralai.models.chat_completion import ChatMessage
 from openai import OpenAI
 from openai import AzureOpenAI
 import google.generativeai as genai
 import ollama
-from PIL import Image
-import base64
+
+from langchain.embeddings.openai import OpenAIEmbeddings
+from langchain.llms import ollama as langchain_ollama
+from langchain.vectorstores import Chroma
+from langchain.chains import RetrievalQA
+from langchain.document_loaders import TextLoader, CSVLoader, PyPDFLoader
+from langchain_text_splitters import CharacterTextSplitter
 
 # ------------------ Helper Functions ------------------ #
+
+# Function to create embeddings
+def create_embeddings(uploaded_files, chunk_size=4000, chunk_overlap=400):
+    documents = []
+
+    if uploaded_files is not None and type(uploaded_files) is list and len(uploaded_files) > 0:
+        # process the uploaded files
+        for file in uploaded_files:
+            file_name = file.name
+            file_content = file.read()
+
+            if file_name.endswith(".txt"):
+                loader = TextLoader(file_content)
+            elif file_name.endswith(".csv"):
+                loader = CSVLoader(file_content)
+            elif file_name.endswith(".pdf"):
+                loader = PyPDFLoader(file_content)
+            else:
+                # Handle unsupported file types gracefully
+                st.error(f"Unsupported file type: {file_name}")
+                continue
+
+            documents.append(loader.load())
+
+        # Split documents into chunks
+        text_splitter = CharacterTextSplitter(chunk_size=chunk_size, chunk_overlap=chunk_overlap)
+        docs = text_splitter.split_documents(documents)
+
+        # Create embeddings database (Chroma)
+        embeddings = OpenAIEmbeddings()
+        db = Chroma.from_documents(docs, embeddings)
+
+        return db
+    else:
+        return None
+
+# Function to get user document upload for RAG
+def get_rag_document_input(max_files=3, max_size=20):
+    uploaded_files = st.file_uploader("Choose document for RAG...", type=["pdf", "csv", "txt"], accept_multiple_files=True)
+    removed_files = []
+
+    if uploaded_files is not None:
+        # check the file sizes
+        for file in uploaded_files:
+            if file.size > max_size * 1024 * 1024:
+                # remove the file from the list
+                removed_files.append(file)
+                uploaded_files.remove(file)
+        
+        # print the warning message if any file is removed
+        if len(removed_files) > 0:
+            st.warning(f"File(s) {", ".join([file.name for file in removed_files])}larger than {max_size} MB are removed. Please upload file(s) smaller than {max_size} MB.")
+
+        # check the number of files uploaded
+        if len(uploaded_files) > max_files:
+            st.warning(f"Please upload only {max_files} file(s). Only the first {max_files} file(s) will be processed.")
+            uploaded_files = uploaded_files[:max_files]
+
+    return uploaded_files
+
 
 # Function to encode the image
 def encode_image(image_file):
@@ -218,7 +287,7 @@ Example of expected JSON response format:
     return prompt
 
 # Function to get threat model from the GPT response.
-def get_threat_model(api_key, model_name, prompt, max_tokens=4000):
+def get_threat_model(api_key, model_name, prompt, max_tokens=4000, ragdb=None):
     client = OpenAI(api_key=api_key)
 
     response = client.chat.completions.create(
@@ -237,7 +306,7 @@ def get_threat_model(api_key, model_name, prompt, max_tokens=4000):
     return response_content
 
 # Function to get threat model from the Azure OpenAI response.
-def get_threat_model_azure(api_endpoint, api_key, api_version, deployment_name, prompt):
+def get_threat_model_azure(api_endpoint, api_key, api_version, deployment_name, prompt, ragdb=None):
     client = AzureOpenAI(
         azure_endpoint = api_endpoint,
         api_key = api_key,
@@ -259,7 +328,7 @@ def get_threat_model_azure(api_endpoint, api_key, api_version, deployment_name, 
     return response_content
 
 # Function to get threat model from the Azure OpenAI response.
-def get_threat_model_mistral(api_key, model_name, prompt):
+def get_threat_model_mistral(api_key, model_name, prompt, ragdb=None):
     client = MistralClient(api_key=api_key)
 
     response = client.chat(
@@ -276,7 +345,7 @@ def get_threat_model_mistral(api_key, model_name, prompt):
     return response_content
 
 # Function to get threat model from Google Gemini.
-def get_threat_model_google_gemini(api_key, model_name, prompt):
+def get_threat_model_gemini(api_key, model_name, prompt, ragdb=None):
     genai.configure(api_key=api_key)
     gemini_model = genai.GenerativeModel(model_name=model_name)
 
@@ -288,18 +357,26 @@ def get_threat_model_google_gemini(api_key, model_name, prompt):
     return response.text
 
 # Function to get threat model from the GPT response.
-def get_threat_model_local(model_name, prompt):
-    response = ollama.chat(
-        model=model_name,
-        format='json',
-        messages=[
-            {"role": "system", "content": "You are a helpful assistant designed to output JSON."},
-            {"role": "user", "content": prompt}
-        ],
-    )
+def get_threat_model_local(model_name, prompt, ragdb=None):
 
-    # Convert the JSON string in the 'content' field to a Python dictionary
-    response_content = json.loads(response['message']['content'])
+    if ragdb is not None:
+        llm = langchain_ollama(model_name=model_name)
+        qa_chain = RetrievalQA(llm=llm, retriever=ragdb.as_retriever())
+
+        response_content = qa_chain.run(prompt)
+
+    else:
+        response = ollama.chat(
+            model=model_name,
+            format='json',
+            messages=[
+                {"role": "system", "content": "You are a helpful assistant designed to output JSON."},
+                {"role": "user", "content": prompt}
+            ],
+        )
+
+        # Convert the JSON string in the 'content' field to a Python dictionary
+        response_content = json.loads(response['message']['content'])
 
     return response_content
 

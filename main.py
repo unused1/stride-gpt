@@ -52,6 +52,8 @@ with st.sidebar:
         help="Select the model provider you would like to use. This will determine the models available for selection.",
     )
 
+    del st.session_state['ragdb']
+
     if model_provider == "OpenAI API":
         st.markdown(
         """
@@ -195,6 +197,13 @@ with st.sidebar:
             key="selected_model_vision",
             help="Availale local vision models.",
         )
+
+        # Add uploader for RAG
+        uploaded_ragdocs = hf.get_rag_document_input()
+        ragdocs_submit_button = st.button(label="Generate RAG database from document.")
+
+        if ragdocs_submit_button and uploaded_ragdocs:
+            st.session_state['ragdb'] = hf.create_embeddings(uploaded_ragdocs)
 
     st.markdown("""---""")
 
@@ -394,19 +403,25 @@ with st.expander("Threat Model", expanded=False):
     if threat_model_submit_button and app_input:
         # Generate the prompt using the create_prompt function
         threat_model_prompt = hf.create_threat_model_prompt(app_type, authentication, internet_facing, sensitive_data, pam, remote_admin, development_model, operation_model, app_input)
+        if st.session_state['ragdb'] is not None:
+            ragdb = st.session_state['ragdb']
+        else:
+            ragdb = None
 
         # Show a spinner while generating the threat model
         with st.spinner("Analysing potential threats..."):
             try:
                 # Call one of the get_threat_model functions with the generated prompt
                 if model_provider == "Azure OpenAI Service":
-                    model_output = hf.get_threat_model_azure(azure_api_endpoint, azure_api_key, azure_api_version, azure_deployment_name, threat_model_prompt)
+                    model_output = hf.get_threat_model_azure(azure_api_endpoint, azure_api_key, azure_api_version, azure_deployment_name, threat_model_prompt, ragdb)
                 elif model_provider == "OpenAI API":
-                    model_output = hf.get_threat_model(openai_api_key, selected_model, threat_model_prompt)
+                    model_output = hf.get_threat_model(openai_api_key, selected_model, threat_model_prompt, ragdb)
                 elif model_provider == "Mistral API":
-                    model_output = hf.get_threat_model_mistral(mistral_api_key, mistral_model, threat_model_prompt)
+                    model_output = hf.get_threat_model_mistral(mistral_api_key, mistral_model, threat_model_prompt, ragdb)
+                elif model_provider == "Google Gemini":
+                    model_output = hf.get_threat_model_google_gemini(gemini_api_key, selected_model, threat_model_prompt, ragdb)
                 elif model_provider == "Local":
-                    model_output = hf.get_threat_model_local(selected_model, threat_model_prompt)
+                    model_output = hf.get_threat_model_local(selected_model, threat_model_prompt, ragdb)
 
                         
                 # Access the threat model and improvement suggestions from the parsed content
